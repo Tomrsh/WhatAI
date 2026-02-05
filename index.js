@@ -16,14 +16,13 @@ const { getDatabase, ref, push, update, remove } = require("firebase/database");
 const firebaseConfig = {
   apiKey: "AIzaSyAb7V8Xxg5rUYi8UKChEd3rR5dglJ6bLhU",
   authDomain: "t2-storage-4e5ca.firebaseapp.com",
-  databaseURL: "https://t2-storage-4e5ca-default-rtdb>
+  databaseURL: "https://t2-storage-4e5ca-default-rtdb.firebaseio.com",
   projectId: "t2-storage-4e5ca",
-  storageBucket: "t2-storage-4e5ca.firebasestorage.ap>
+  storageBucket: "t2-storage-4e5ca.firebasestorage.app",
   messagingSenderId: "667143720466",
   appId: "1:667143720466:web:c8bfe23f3935d3c7e052cb",
   measurementId: "G-K2KPMMC5C6"
 };
-
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getDatabase(firebaseApp);
 const app = express();
