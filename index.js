@@ -13,15 +13,7 @@ const { initializeApp } = require("firebase/app");
 const { getDatabase, ref, push, update, remove } = require("firebase/database");
 
 // --- CONFIGURATION ---
-const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_PROJECT.firebaseapp.com",
-    databaseURL: "YOUR_DATABASE_URL",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_PROJECT.appspot.com",
-    messagingSenderId: "YOUR_ID",
-    appId: "YOUR_APP_ID"
-};
+
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getDatabase(firebaseApp);
@@ -32,6 +24,16 @@ let sock;
 let qrCodeUrl = "";
 let connectionStatus = "INITIALIZING";
 
+const firebaseConfig = {
+  apiKey: "AIzaSyAb7V8Xxg5rUYi8UKChEd3rR5dglJ6bLhU",
+  authDomain: "t2-storage-4e5ca.firebaseapp.com",
+  databaseURL: "https://t2-storage-4e5ca-default-rtdb>
+  projectId: "t2-storage-4e5ca",
+  storageBucket: "t2-storage-4e5ca.firebasestorage.ap>
+  messagingSenderId: "667143720466",
+  appId: "1:667143720466:web:c8bfe23f3935d3c7e052cb",
+  measurementId: "G-K2KPMMC5C6"
+};
 // --- WHATSAPP CONNECTION ---
 async function startWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_session');
