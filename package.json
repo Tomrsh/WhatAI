@@ -1,5 +1,5 @@
 {
-  "name": "w",
+  "name": "ww",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -14,11 +14,9 @@
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "axios": "^1.13.4",
     "express": "^5.2.1",
-    "firebase": "^12.8.0",
-    "fs-extra": "^11.3.3",
-    "pino": "^10.3.0",
+    "mime-types": "^3.0.2",
     "qrcode": "^1.5.4",
-    "qrcode-terminal": "^0.12.0",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "uuid": "^13.0.0"
   }
 }
