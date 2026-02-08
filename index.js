@@ -1,19 +1,33 @@
-const { 
-    default: makeWASocket, 
-    DisconnectReason, 
-    fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
-    jidDecode
-} = require('@whiskeysockets/baileys');
-const { initializeApp } = require('firebase/app');
-const { getDatabase, ref, get, set, remove, push, onValue } = require('firebase/database');
+/**
+ * ULTIMATE WHATSAPP DASHBOARD (Node v24 & Termux Optimized)
+ * Fixed: TypeError: makeInMemoryStore is not a function
+ */
+
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
-const qrcode = require('qrcode');
+const { Server } = require('socket.io');
 const pino = require('pino');
 
-// --- FIREBASE CONFIG (Sahi se bharna bhai) ---
+// --- SAFE BAILEYS IMPORT (Fix for Node v24/Termux) ---
+const BaileysLib = require('@whiskeysockets/baileys');
+const makeWASocket = BaileysLib.default || BaileysLib;
+const { 
+    useMultiFileAuthState, 
+    DisconnectReason, 
+    fetchLatestBaileysVersion, 
+    makeInMemoryStore, 
+    BufferJSON, 
+    delay 
+} = BaileysLib.default ? BaileysLib : { ...BaileysLib, ...BaileysLib.default };
+
+// --- FIREBASE MODULAR SDK ---
+const { initializeApp } = require("firebase/app");
+const { getDatabase, ref, set, get, child, push, remove } = require("firebase/database");
+
+// ==============================================================================
+// 1. CONFIGURATION (Apna Firebase Config Yahan Dalein)
+// ==============================================================================
+
 const firebaseConfig = {
   apiKey: "AIzaSyAb7V8Xxg5rUYi8UKChEd3rR5dglJ6bLhU",
   authDomain: "t2-storage-4e5ca.firebaseapp.com",
@@ -25,283 +39,250 @@ const firebaseConfig = {
   measurementId: "G-K2KPMMC5C6"
 };
 
-const firebaseApp = initializeApp(firebaseConfig);
-const db = getDatabase(firebaseApp);
-const SESSION_PATH = 'wa_session_v8';
-const CHAT_PATH = 'wa_backups';
-
-const app = express();
-const server = http.createServer(app);
-const io = socketIo(server);
+const appFirebase = initializeApp(firebaseConfig);
+const db = getDatabase(appFirebase);
 const PORT = process.env.PORT || 3000;
+const store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
 
-app.use(express.json());
+// ==============================================================================
+// 2. CUSTOM FIREBASE AUTH ADAPTER
+// ==============================================================================
 
-let sock;
-let isConnected = false;
-let qrCodeData = null;
+const useFirebaseAuthState = async (rootRef) => {
+    const saveToDb = async (path, data) => {
+        const json = JSON.stringify(data, BufferJSON.replacer);
+        await set(child(rootRef, path), json);
+    };
 
-// Firebase clean data helper
-const cleanData = (obj) => JSON.parse(JSON.stringify(obj, (key, value) => 
-    typeof value === 'undefined' ? null : value
-));
+    const readFromDb = async (path) => {
+        const snapshot = await get(child(rootRef, path));
+        if (snapshot.exists()) {
+            return JSON.parse(snapshot.val(), BufferJSON.reviver);
+        }
+        return null;
+    };
 
-// --- FIREBASE AUTH LOGIC ---
-async function useFirebaseAuthState() {
-    let creds;
-    const sessionRef = ref(db, SESSION_PATH + '/creds');
-    const snapshot = await get(sessionRef);
-
-    if (snapshot.exists()) {
-        creds = JSON.parse(JSON.stringify(snapshot.val()), (key, value) => {
-            if (value && typeof value === 'object' && value.type === 'Buffer') return Buffer.from(value.data);
-            return value;
-        });
-    } else {
-        creds = require('@whiskeysockets/baileys').initAuthCreds();
-    }
+    let creds = (await readFromDb('creds')) || (await useMultiFileAuthState('temp_auth')).state.creds;
 
     return {
         state: {
             creds,
-            keys: makeCacheableSignalKeyStore({
+            keys: {
                 get: async (type, ids) => {
-                    const res = {};
-                    for (const id of ids) {
-                        const itemSnap = await get(ref(db, `${SESSION_PATH}/keys/${type}-${id}`));
-                        if (itemSnap.exists()) res[id] = itemSnap.val();
-                    }
-                    return res;
+                    const data = {};
+                    await Promise.all(ids.map(async (id) => {
+                        const val = await readFromDb(`keys/${type}/${id}`);
+                        if (val) data[id] = val;
+                    }));
+                    return data;
                 },
                 set: async (data) => {
-                    for (const type in data) {
-                        for (const id in data[type]) {
-                            const val = data[type][id];
-                            const itemRef = ref(db, `${SESSION_PATH}/keys/${type}-${id}`);
-                            val ? await set(itemRef, cleanData(val)) : await remove(itemRef);
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const path = `keys/${category}/${id}`;
+                            if (value) tasks.push(saveToDb(path, value));
+                            else tasks.push(remove(child(rootRef, path)));
                         }
                     }
+                    await Promise.all(tasks);
                 }
-            }, pino({ level: 'silent' }))
+            }
         },
-        saveCreds: async () => await set(sessionRef, cleanData(creds))
+        saveCreds: () => saveToDb('creds', creds)
     };
-}
+};
+
+// ==============================================================================
+// 3. WHATSAPP ENGINE & SERVER
+// ==============================================================================
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+app.use(express.json());
+
+let sock;
+let qrCodeData = null;
+let connectionStatus = 'disconnected';
 
 async function startWhatsApp() {
-    const { state, saveCreds } = await useFirebaseAuthState();
+    const { state, saveCreds } = await useFirebaseAuthState(ref(db, 'whatsapp_session'));
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
         version,
         logger: pino({ level: 'silent' }),
         auth: state,
-        printQRInTerminal: false,
-        browser: ["Master-V8", "Safari", "1.0.0"],
-        keepAliveIntervalMs: 30000
+        printQRInTerminal: true,
+        browser: ["Ultimate Dash", "Chrome", "1.0.0"]
+    });
+
+    store.bind(sock.ev);
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) { qrCodeData = qr; io.emit('qr', qr); connectionStatus = 'scanning'; }
+        
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            connectionStatus = 'disconnected';
+            io.emit('status', { status: 'disconnected' });
+            if (shouldReconnect) startWhatsApp();
+        } else if (connection === 'open') {
+            connectionStatus = 'connected';
+            qrCodeData = null;
+            io.emit('status', { status: 'connected', user: sock.user });
+        }
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr) {
-            qrCodeData = await qrcode.toDataURL(qr);
-            io.emit('qr', qrCodeData);
-        }
-
-        if (connection === 'close') {
-            isConnected = false;
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) {
-                console.log("Reconnecting...");
-                setTimeout(() => startWhatsApp(), 5000);
-            } else {
-                console.log("Logged Out. Clearing Session...");
-                await remove(ref(db, SESSION_PATH));
-                qrCodeData = null;
-                startWhatsApp();
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type === 'notify') {
+            for (const msg of messages) {
+                if (!msg.message) continue;
+                const payload = {
+                    id: msg.key.id,
+                    remoteJid: msg.key.remoteJid,
+                    isFromMe: msg.key.fromMe,
+                    text: msg.message.conversation || msg.message.extendedTextMessage?.text || "[Media]",
+                    pushName: msg.pushName || "User",
+                    timestamp: msg.messageTimestamp
+                };
+                io.emit('new_message', payload);
+                const chatPath = `chats/${payload.remoteJid.replace(/[.#$/\[\]]/g, '_')}`;
+                push(ref(db, chatPath), payload);
             }
-        } else if (connection === 'open') {
-            isConnected = true;
-            qrCodeData = null;
-            io.emit('ready', true);
-            console.log('✅ WhatsApp V8 Connected Successfully');
         }
-    });
-
-    sock.ev.on('messages.upsert', async m => {
-        const msg = m.messages[0];
-        if (!msg.message || msg.key.remoteJid === 'status@broadcast') return;
-
-        const jid = msg.key.remoteJid;
-        const name = msg.pushName || jid.split('@')[0];
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "Media Message";
-        const time = new Date().toLocaleString();
-        const safeId = jid.replace(/[^a-zA-Z0-9]/g, '');
-
-        push(ref(db, `${CHAT_PATH}/${safeId}`), {
-            sender: name, text, time, fromMe: msg.key.fromMe, jid: jid
-        });
     });
 }
 
-// API to Send Message
-app.post('/send-api', async (req, res) => {
-    let { jid, message } = req.body;
-    if (!jid.includes('@')) jid = jid + '@s.whatsapp.net';
-    try {
-        await sock.sendMessage(jid, { text: message });
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+startWhatsApp();
+
+// --- SOCKET LOGIC ---
+io.on('connection', (socket) => {
+    socket.emit('status', { status: connectionStatus, user: sock?.user });
+    if (qrCodeData) socket.emit('qr', qrCodeData);
+
+    socket.on('send_direct', async ({ number, text }) => {
+        const jid = `${number.replace(/\D/g, '')}@s.whatsapp.net`;
+        await sock.sendMessage(jid, { text });
+        socket.emit('ui_notification', { type: 'success', msg: 'Message Sent!' });
+    });
+
+    socket.on('schedule_msg', ({ number, text, seconds }) => {
+        socket.emit('ui_notification', { type: 'info', msg: `Timer set: ${seconds}s` });
+        setTimeout(async () => {
+            const jid = `${number.replace(/\D/g, '')}@s.whatsapp.net`;
+            if(sock) await sock.sendMessage(jid, { text });
+        }, seconds * 1000);
+    });
 });
 
-// UI Route
-app.get('/', (req, res) => {
-    res.send(`
+// ==============================================================================
+// 4. UI (DASHBOARD)
+// ==============================================================================
+
+const HTML_UI = `
 <!DOCTYPE html>
-<html lang="hi">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>WA-Master V8</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WA Dash v2.0</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="/socket.io/socket.io.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
-        body { background: #0b141a; color: #e9edef; font-family: 'Segoe UI', sans-serif; height: 100dvh; display: flex; overflow: hidden; }
-        .sidebar { width: 100%; max-width: 350px; background: #111b21; border-right: 1px solid #222d34; display: flex; flex-direction: column; z-index: 50; transition: 0.3s; }
-        .main { flex: 1; display: flex; flex-direction: column; background: #0b141a; position: relative; }
-        @media (max-width: 768px) {
-            .sidebar { position: fixed; left: -100%; height: 100%; }
-            .sidebar.active { left: 0; }
-        }
-        .bubble { padding: 10px; border-radius: 12px; margin: 5px; max-width: 80%; font-size: 14px; }
-        .in { background: #202c33; align-self: flex-start; }
-        .out { background: #005c4b; align-self: flex-end; }
-        #overlay { position: fixed; inset: 0; background: #0b141a; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
-        .hidden { display: none !important; }
+        body { background-color: #0c1317; color: #e9edef; }
+        .wa-bg { background-image: url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png'); opacity: 0.05; }
     </style>
 </head>
-<body>
-
-    <div id="overlay">
-        <div id="qr-container" class="bg-white p-5 rounded-2xl mb-5">
-            <div class="p-10 text-black font-bold animate-pulse">Initializing WhatsApp...</div>
-        </div>
-        <p class="text-emerald-500 font-bold uppercase tracking-tighter">Master V8 Engine</p>
+<body class="h-screen flex overflow-hidden flex-col md:flex-row">
+    <div id="connOverlay" class="fixed inset-0 z-50 bg-[#111b21] flex flex-col items-center justify-center">
+        <h1 class="text-2xl mb-4">Link Device</h1>
+        <div id="qrcode" class="bg-white p-3 rounded"></div>
+        <p class="mt-4 text-gray-500">Scan QR to Start Dashboard</p>
     </div>
 
-    <div class="sidebar" id="sidebar">
-        <div class="p-4 bg-[#202c33] flex justify-between items-center">
-            <h1 class="font-bold text-emerald-500">Backups</h1>
-            <button onclick="openDirect()" class="text-emerald-500 text-lg"><i class="fas fa-plus-circle"></i></button>
-        </div>
-        <div id="chat-list" class="flex-1 overflow-y-auto"></div>
-    </div>
-
-    <div class="main">
-        <div id="chat-header" class="hidden p-3 bg-[#202c33] flex items-center border-b border-[#222d34]">
-            <button onclick="toggleSidebar()" class="md:hidden mr-3"><i class="fas fa-bars"></i></button>
-            <div id="chat-name" class="font-bold flex-1 text-emerald-400">Select Chat</div>
+    <div class="w-full md:w-80 bg-[#202c33] border-r border-gray-700 flex flex-col">
+        <div class="p-4 flex justify-between items-center border-b border-gray-700">
+            <div class="flex items-center gap-2">
+                <div id="dot" class="w-3 h-3 rounded-full bg-red-500"></div>
+                <span class="font-bold">WA Dashboard</span>
+            </div>
             <div class="flex gap-2">
-                <input id="timer-val" type="number" placeholder="Sec" class="w-12 bg-[#2a3942] rounded p-1 text-xs outline-none">
-                <button onclick="sendMsg(true)" class="bg-orange-600 text-[10px] px-2 py-1 rounded font-bold">TIMER</button>
+                <button onclick="toggleModal('directModal')" class="p-2 hover:bg-gray-600 rounded">💬</button>
+                <button onclick="toggleModal('schModal')" class="p-2 hover:bg-gray-600 rounded">⏰</button>
             </div>
         </div>
+        <div id="chatList" class="flex-1 overflow-y-auto p-2 text-sm text-gray-400 italic">No recent chats loaded...</div>
+    </div>
 
-        <div id="msg-container" class="flex-1 overflow-y-auto p-4 flex flex-col">
-            <div class="m-auto text-center opacity-10">
-                <i class="fab fa-whatsapp text-9xl"></i>
-                <p>Firebase Cloud Synced</p>
+    <div class="flex-1 relative flex flex-col bg-[#0b141a]">
+        <div class="absolute inset-0 wa-bg pointer-events-none"></div>
+        <div id="msgs" class="flex-1 p-4 overflow-y-auto space-y-3 z-10"></div>
+        <div class="p-4 bg-[#202c33] z-10"><input disabled placeholder="Use Tool Icons for Sending" class="w-full bg-[#2a3942] p-2 rounded text-sm outline-none opacity-50"></div>
+    </div>
+
+    <div id="directModal" class="hidden fixed inset-0 bg-black/70 z-[60] items-center justify-center p-4">
+        <div class="bg-[#202c33] p-6 rounded-lg w-full max-w-sm">
+            <h2 class="text-lg mb-4">Direct Message</h2>
+            <input id="num" placeholder="Number (with country code)" class="w-full bg-[#2a3942] p-2 rounded mb-3 outline-none">
+            <textarea id="txt" placeholder="Message..." class="w-full bg-[#2a3942] p-2 rounded mb-4 h-24 outline-none"></textarea>
+            <div class="flex justify-end gap-2">
+                <button onclick="toggleModal('directModal')" class="px-4 py-2">Close</button>
+                <button onclick="send()" class="bg-[#00a884] px-4 py-2 rounded text-black font-bold">Send</button>
             </div>
-        </div>
-
-        <div id="input-bar" class="hidden p-3 bg-[#202c33] flex gap-2">
-            <input id="input-txt" type="text" placeholder="Type a message..." class="flex-1 bg-[#2a3942] p-3 rounded-xl outline-none text-sm">
-            <button onclick="sendMsg(false)" class="bg-emerald-500 text-black w-12 h-12 rounded-full flex items-center justify-center shadow-lg"><i class="fas fa-paper-plane"></i></button>
         </div>
     </div>
 
-    <script src="https://www.gstatic.com/firebasejs/9.1.3/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.1.3/firebase-database-compat.js"></script>
+    <div id="schModal" class="hidden fixed inset-0 bg-black/70 z-[60] items-center justify-center p-4">
+        <div class="bg-[#202c33] p-6 rounded-lg w-full max-w-sm">
+            <h2 class="text-lg mb-4">Schedule Message</h2>
+            <input id="sNum" placeholder="Number" class="w-full bg-[#2a3942] p-2 rounded mb-2 outline-none">
+            <textarea id="sTxt" placeholder="Message..." class="w-full bg-[#2a3942] p-2 rounded mb-2 h-20 outline-none"></textarea>
+            <input id="sTime" type="number" placeholder="Seconds" class="w-full bg-[#2a3942] p-2 rounded mb-4 outline-none">
+            <button onclick="schedule()" class="w-full bg-[#00a884] py-2 rounded text-black font-bold">Set Timer</button>
+        </div>
+    </div>
 
     <script>
         const socket = io();
-        firebase.initializeApp(${JSON.stringify(firebaseConfig)});
-        const fb = firebase.database();
-
-        socket.on('qr', url => {
-            document.getElementById('overlay').classList.remove('hidden');
-            document.getElementById('qr-container').innerHTML = \`<img src="\${url}" class="w-64 h-64 shadow-xl">\`;
+        function toggleModal(id) { document.getElementById(id).classList.toggle('hidden'); document.getElementById(id).classList.toggle('flex'); }
+        
+        socket.on('qr', qr => {
+            const q = document.getElementById('qrcode');
+            q.innerHTML = ""; new QRCode(q, qr);
+            document.getElementById('connOverlay').classList.remove('hidden');
         });
 
-        socket.on('ready', () => {
-            document.getElementById('overlay').classList.add('hidden');
-            syncList();
-        });
-
-        let activeJid = null;
-
-        function toggleSidebar() { document.getElementById('sidebar').classList.toggle('active'); }
-
-        function syncList() {
-            fb.ref('${CHAT_PATH}').on('value', snap => {
-                const list = document.getElementById('chat-list');
-                list.innerHTML = '';
-                snap.forEach(child => {
-                    const data = Object.values(child.val());
-                    const last = data[data.length - 1];
-                    const div = document.createElement('div');
-                    div.className = "p-4 border-b border-[#222d34] cursor-pointer hover:bg-[#202c33]";
-                    div.onclick = () => { openChat(child.key, last.sender, last.jid); if(window.innerWidth < 768) toggleSidebar(); };
-                    div.innerHTML = \`<div class="font-bold text-sm">\${last.sender}</div><div class="text-xs text-gray-500 truncate">\${last.text}</div>\`;
-                    list.appendChild(div);
-                });
-            });
-        }
-
-        function openChat(id, name, jid) {
-            activeJid = jid;
-            document.getElementById('chat-header').classList.remove('hidden');
-            document.getElementById('input-bar').classList.remove('hidden');
-            document.getElementById('chat-name').innerText = name;
-            fb.ref('${CHAT_PATH}/' + id).on('value', snap => {
-                const box = document.getElementById('msg-container'); box.innerHTML = '';
-                snap.forEach(c => {
-                    const m = c.val();
-                    box.innerHTML += \`<div class="bubble \${m.fromMe ? 'out' : 'in'}">\${m.text}<div class="text-[8px] mt-1 opacity-50 text-right">\${m.time.split(',')[1]}</div></div>\`;
-                });
-                box.scrollTop = box.scrollHeight;
-            });
-        }
-
-        async function sendMsg(isTimer) {
-            const txt = document.getElementById('input-txt');
-            const sec = document.getElementById('timer-val').value;
-            if(!txt.value || !activeJid) return;
-
-            if(isTimer && sec) {
-                alert('Timer set for ' + sec + 's');
-                setTimeout(() => {
-                    fetch('/send-api', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ jid: activeJid, message: '[Scheduled]: ' + txt.value }) });
-                }, sec * 1000);
-            } else {
-                await fetch('/send-api', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ jid: activeJid, message: txt.value }) });
+        socket.on('status', data => {
+            const dot = document.getElementById('dot');
+            if(data.status === 'connected') {
+                document.getElementById('connOverlay').classList.add('hidden');
+                dot.classList.replace('bg-red-500', 'bg-green-500');
             }
-            txt.value = '';
-        }
+        });
 
-        function openDirect() {
-            const num = prompt("Enter number with country code (e.g. 91...)");
-            if(num) openChat(num.replace(/[^0-9]/g, ''), num, num + '@s.whatsapp.net');
-        }
+        socket.on('new_message', msg => {
+            const box = document.getElementById('msgs');
+            const div = document.createElement('div');
+            div.className = \`flex w-full \${msg.isFromMe ? 'justify-end' : 'justify-start'}\`;
+            div.innerHTML = \`<div class="\${msg.isFromMe ? 'bg-[#005c4b]' : 'bg-[#202c33]'} p-2 rounded-lg max-w-[80%] shadow text-sm">
+                <div class="text-[10px] text-gray-400">\${msg.pushName}</div>\${msg.text}</div>\`;
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+        });
+
+        function send() { socket.emit('send_direct', { number: document.getElementById('num').value, text: document.getElementById('txt').value }); toggleModal('directModal'); }
+        function schedule() { socket.emit('schedule_msg', { number: document.getElementById('sNum').value, text: document.getElementById('sTxt').value, seconds: document.getElementById('sTime').value }); toggleModal('schModal'); }
     </script>
 </body>
 </html>
-    `);
-});
+`;
 
-startWhatsApp();
-server.listen(PORT, () => console.log('✅ WA-MASTER V8 LIVE!'));
+app.get('/', (req, res) => res.send(HTML_UI));
+server.listen(PORT, () => console.log(`Server started on http://localhost:${PORT}`));
