@@ -1,118 +1,189 @@
 const { 
-    default: makeWASocket, 
+    makeWASocket, 
     useMultiFileAuthState, 
-    DisconnectReason, 
+    DisconnectReason,
     fetchLatestBaileysVersion 
 } = require('@whiskeysockets/baileys');
 const express = require('express');
-const qrcode = require('qrcode');
-const axios = require('axios');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { initializeApp } = require("firebase/app");
+const { getDatabase, ref, get, set, push, limitToLast, query, update } = require("firebase/database");
 
 const app = express();
-const port = 3000;
-app.use(express.json());
+const PORT = 3000;
 
-let sock;
-let qrCodeData = "";
-let connectionStatus = "Disconnected";
-let excludedNumbers = new Set();
+// ================= [ 🛠️ CONFIGURATION ] =================
+const MY_NUMBER = "916268249364@s.whatsapp.net"; // ⚠️ Apna No. 91 ke saath
+const KEY_URL = "http://key-to-url.onrender.com/get/9odr55"; // Aapka Key URL
 
-// --- FREE AI CONFIG (Groq Example) ---
-// Aap yahan apni free Groq key daal sakte hain
-const GROQ_API_KEY = "http://key-to-url.onrender.com/get/c5js9j"; 
+const firebaseConfig = {
+  apiKey: "AIzaSyAb7V8Xxg5rUYi8UKChEd3rR5dglJ6bLhU",
+  authDomain: "t2-storage-4e5ca.firebaseapp.com",
+  databaseURL: "https://t2-storage-4e5ca-default-rtdb.firebaseio.com",
+  projectId: "t2-storage-4e5ca",
+  storageBucket: "t2-storage-4e5ca.firebasestorage.app",
+  messagingSenderId: "667143720466",
+  appId: "1:667143720466:web:c8bfe23f3935d3c7e052cb",
+  measurementId: "G-K2KPMMC5C6"
+};
 
-async function getAIResponse(userText) {
+const AYESHA_PROMPT = `Tumhara naam Ayesha hai. Tum Boss (Owner) ki personal assistant ho. 
+Sirf Boss ko "Boss" bolo, baki sab ke liye professional assistant raho. Natural Hinglish use karo.`;
+// ======================================================
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getDatabase(firebaseApp);
+
+let botStatus = "Initializing...";
+let qrCodeImage = "";
+let lastRequestTime = Date.now();
+let genAI, model;
+
+// --- 1. API KEY FETCHING LOGIC ---
+async function fetchApiKey() {
     try {
-        const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-            model: "llama3-8b-8192",
-            messages: [{ role: "user", content: userText }]
-        }, {
-            headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` }
-        });
-        return response.data.choices[0].message.content;
+        console.log("Fetching API Key from URL...");
+        const response = await fetch(KEY_URL);
+        const API_KEY = await response.text();
+        
+        if (!API_KEY || API_KEY.includes("error")) {
+            throw new Error("Key fetch nahi ho payi!");
+        }
+        
+        genAI = new GoogleGenerativeAI(API_KEY.trim());
+        model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        console.log("✅ API Key Loaded Successfully!");
+        return true;
     } catch (err) {
-        return "Sorry bhai, AI thoda thak gaya hai.";
+        console.error("❌ Key Error:", err.message);
+        return false;
     }
 }
 
-async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('wa_session');
+// --- 2. WHATSAPP CONNECTION ---
+async function startAyesha() {
+    // Pehle Key fetch karein
+    const keyLoaded = await fetchApiKey();
+    if (!keyLoaded) {
+        botStatus = "Error: Key Fetch Failed ❌";
+        return;
+    }
+
+    const { state, saveCreds } = await useMultiFileAuthState('ayesha_session');
     const { version } = await fetchLatestBaileysVersion();
 
-    sock = makeWASocket({
+    const sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: true
+        printQRInTerminal: true,
+        browser: ["Ayesha AI", "Chrome", "1.0"]
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, qr } = update;
-        if (qr) qrCodeData = qr;
-        if (connection === 'open') connectionStatus = "Connected ✅";
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+            botStatus = "Scan QR Code 📲";
+            qrcodeTerminal.generate(qr, { small: true });
+            qrCodeImage = await QRCode.toDataURL(qr);
+        }
+        if (connection === 'open') {
+            botStatus = "Online ✅";
+            qrCodeImage = "";
+            console.log("✅ Ayesha Connected & Key Secured!");
+        }
+        if (connection === 'close') {
+            botStatus = "Reconnecting... 🔄";
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) startAyesha();
+        }
     });
 
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        const m = messages[0];
-        if (!m.message || m.key.fromMe) return;
+    sock.ev.on('messages.upsert', async (m) => {
+        const msg = m.messages[0];
+        if (!msg.message || msg.key.fromMe) return;
 
-        const sender = m.key.remoteJid.split('@')[0];
-        const text = m.message.conversation || m.message.extendedTextMessage?.text || "";
+        const jid = msg.key.remoteJid;
+        const isGroup = jid.endsWith('@g.us');
+        const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").trim();
+        const isBoss = (jid === MY_NUMBER);
+        const safeId = jid.replace(/[.@]/g, "_");
 
-        // Check if Automation is OFF for this person
-        if (excludedNumbers.has(sender)) return;
+        try {
+            const settingsRef = ref(db, `settings/${safeId}`);
+            const settingsSnap = await get(settingsRef);
+            let aiActive = settingsSnap.val()?.enabled ?? (!isGroup);
 
-        // Get Free AI Response
-        const reply = await getAIResponse(text);
-        await sock.sendMessage(m.key.remoteJid, { text: reply });
+            // Toggle Commands
+            if (text === ".aioff" && (isBoss || !isGroup)) {
+                await update(settingsRef, { enabled: false });
+                return await sock.sendMessage(jid, { text: "Ayesha AI: OFF ❌" });
+            }
+            if (text === ".aion" && (isBoss || !isGroup)) {
+                await update(settingsRef, { enabled: true });
+                return await sock.sendMessage(jid, { text: "Ayesha AI: ON ✅" });
+            }
+
+            if (!aiActive) return;
+
+            // Rate Limit (Gemini Rules)
+            const now = Date.now();
+            if (now - lastRequestTime < 3000) return;
+            lastRequestTime = now;
+
+            // AI Logic
+            const chatRef = ref(db, `chats/${safeId}`);
+            const historySnap = await get(query(chatRef, limitToLast(6)));
+            let historyText = "";
+            historySnap.forEach(s => { historyText += `${s.val().role}: ${s.val().text}\n`; });
+
+            // Check if model is loaded
+            if (!model) await fetchApiKey();
+
+            const result = await model.generateContent(`${AYESHA_PROMPT}\n\nHistory:\n${historyText}\nUser: ${text}`);
+            const aiReply = result.response.text().trim();
+
+            await push(chatRef, { role: isBoss ? "Boss" : "User", text: text });
+            await push(chatRef, { role: "Ayesha", text: aiReply });
+            await sock.sendMessage(jid, { text: aiReply });
+
+        } catch (e) {
+            console.log("Error in AI Logic:", e.message);
+            // Agar Quota ya Key ka error ho toh refresh karein
+            if (e.message.includes("429") || e.message.includes("API_KEY")) {
+                await fetchApiKey();
+            }
+        }
     });
 }
 
-connectToWhatsApp();
-
-// --- Web Dashboard APIs ---
+// --- DASHBOARD (UI) ---
 app.get('/', (req, res) => {
     res.send(`
-    <html>
-    <body style="font-family:sans-serif; text-align:center; background:#121b22; color:white;">
-        <h2>WhatsApp Free AI Automation</h2>
-        <div id="qr">Loading QR...</div>
-        <p id="stat">Status: Checking...</p>
-        <button onclick="pickContacts()" style="padding:10px; border-radius:10px; background:#25d366; color:white;">📁 Automation OFF karne ke liye select karein</button>
-        <div id="list" style="margin-top:20px; color:#aaa;"></div>
-        
-        <script>
-            setInterval(async () => {
-                const r = await fetch('/status');
-                const d = await r.json();
-                document.getElementById('stat').innerText = d.status;
-                if(d.qr) document.getElementById('qr').innerHTML = '<img src="'+d.qr+'" style="background:white; padding:10px;"/>';
-                else if(d.status == "Connected ✅") document.getElementById('qr').innerHTML = "🟢 Bot Active!";
-            }, 3000);
-
-            async function pickContacts() {
-                const contacts = await navigator.contacts.select(['tel'], {multiple: true});
-                for(let c of contacts) {
-                    let n = c.tel[0].replace(/\\D/g,'');
-                    await fetch('/exclude', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({number: n})});
-                }
-                location.reload();
-            }
-        </script>
-    </body>
-    </html>
+    <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { background: #0f172a; color: white; font-family: sans-serif; text-align: center; padding: 40px 20px; }
+        .card { background: #1e293b; padding: 30px; border-radius: 20px; max-width: 400px; margin: auto; border: 1px solid #334155; }
+        .status { font-size: 1.5rem; color: #10b981; font-weight: bold; margin: 20px 0; }
+        .key-info { color: #94a3b8; font-size: 0.8rem; margin-top: 10px; }
+    </style>
+    <script>setInterval(() => { location.reload(); }, 10000);</script></head>
+    <body>
+        <div class="card">
+            <h1>🌸 Ayesha AI Control</h1>
+            <div class="status">${botStatus}</div>
+            <div class="key-info">API Key: Dynamic (Fetched from URL)</div>
+            ${qrCodeImage ? `<p>Scan to Login:</p><img src="${qrCodeImage}" width="250">` : `<p>Ready & Serving Boss.</p>`}
+        </div>
+    </body></html>
     `);
 });
 
-app.get('/status', async (req, res) => {
-    let q = qrCodeData ? await qrcode.toDataURL(qrCodeData) : "";
-    res.json({qr: q, status: connectionStatus});
+app.listen(PORT, () => {
+    console.log(`🚀 System Live: http://localhost:${PORT}`);
+    startAyesha();
 });
 
-app.post('/exclude', (req, res) => {
-    excludedNumbers.add(req.body.number);
-    res.sendStatus(200);
-});
-
-app.listen(port);
