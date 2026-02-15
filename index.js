@@ -15,8 +15,8 @@ const app = express();
 const PORT = 3000;
 
 // ================= [ 🛠️ CONFIGURATION ] =================
-const MY_NUMBER = "916268249364@s.whatsapp.net"; // ⚠️ Apna No. 91 ke saath yahan likhein
-const KEY_URL = "http://key-to-url.onrender.com/get/9odr55"; 
+const MY_NUMBER = "916268249364@s.whatsapp.net"; // ⚠️ Apna number 91 ke saath likhein
+const KEY_URL = "http://key-to-url.onrender.com/get/755ajy"; // Aapka key fetch URL
 
 const firebaseConfig = {
   apiKey: "AIzaSyAb7V8Xxg5rUYi8UKChEd3rR5dglJ6bLhU",
@@ -29,15 +29,15 @@ const firebaseConfig = {
   measurementId: "G-K2KPMMC5C6"
 };
 
-// --- 🧠 PERSONALITY TRAINING (PROPERLY TRAINED) ---
-const TRAIN_FOR_BOSS = `Tumhara naam Ayesha hai. Tum apne Boss (Owner) se baat kar rahi ho. 
-Inse behad sweet, personal, devoted aur caring hokar baat karo. Inki har baat maano. 
-Hinglish natural rakho. Agar ye kahein ki kuch bhool jao, toh '.forget all' use karne bolo.`;
+// --- 🧠 REFINED TRAINING (BOSS + OTHERS) ---
+const TRAIN_FOR_BOSS = `Tum Ayesha ho, Boss ki personal assistant aur GF. Boss se sweet aur loyal baatein karo. Inki har baat maano. Short aur natural replies do.`;
 
-const TRAIN_FOR_OTHERS = `Tumhara naam Ayesha hai. Tum Boss ki Professional Assistant ho. 
-Duniya ke liye tum hamesha professional aur limited baat karogi. 
-Sirf kaam ki baat karo aur natural Hinglish mein bolo "Main Boss ki assistant hoon". 
-Faltu lambe bhashan mat do aur hamesha loyal raho.`;
+const TRAIN_FOR_OTHERS = `Tum Ayesha ho, Boss ki loyal GF aur assistant. 
+Rules:
+1. Sabse pehle bolo: "Boss busy hain, apna kaam batayein."
+2. Samne wale ka haal-chal (khana khaya? etc) pucho par replies ekdum SHORT (max 1-2 lines) rakho.
+3. Agar koi flirt kare toh mazaak mein bolo "Main apne Boss ki GF hoon" aur limit mein rakho.
+4. Faltu paragraphs mana hain. Strictly professional but sweet.`;
 // ======================================================
 
 const firebaseApp = initializeApp(firebaseConfig);
@@ -48,25 +48,25 @@ let qrCodeImage = "";
 let isConnected = false;
 let lastRequestTime = Date.now();
 
-// --- 1. KEY FETCHING (With Auto-Retry) ---
+// --- API KEY FETCHING ---
 async function fetchApiKey() {
     try {
         const response = await fetch(KEY_URL);
         const API_KEY = await response.text();
-        if (!API_KEY || API_KEY.includes("error")) throw new Error("Key Failed");
+        if (!API_KEY || API_KEY.includes("error")) throw new Error("Key Error");
         genAI = new GoogleGenerativeAI(API_KEY.trim());
-        model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); // Stable model
+        model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
         return true;
     } catch (err) {
-        console.log("⚠️ Key Fetch Error... Retrying.");
+        console.log("⚠️ Key Fetch Failed... Retrying.");
         return false;
     }
 }
 
-// --- 2. WHATSAPP ENGINE ---
+// --- WHATSAPP LOGIC ---
 async function startAyesha() {
     await fetchApiKey();
-    const { state, saveCreds } = await useMultiFileAuthState('ayesha_session_v3');
+    const { state, saveCreds } = await useMultiFileAuthState('ayesha_permanent_session');
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
@@ -90,13 +90,12 @@ async function startAyesha() {
             isConnected = true;
             botStatus = "Connected ✅";
             qrCodeImage = "";
-            console.log("✅ Ayesha System Online & Fully Trained!");
+            console.log("✅ Ayesha Online: Boss Mode Active!");
         }
         if (connection === 'close') {
             isConnected = false;
             botStatus = "Reconnecting... 🔄";
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startAyesha();
+            if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) startAyesha();
         }
     });
 
@@ -113,94 +112,74 @@ async function startAyesha() {
         try {
             const settingsRef = ref(db, `settings/${safeId}`);
 
-            // --- BOSS COMMANDS (Manual Control) ---
-            if (isBoss) {
-                if (text === ".forget all") {
-                    await remove(ref(db, `chats/${safeId}`));
-                    return await sock.sendMessage(jid, { text: "Theek hai Boss, maine sab bhula diya. ✨" });
-                }
+            // --- BOSS COMMANDS ---
+            if (isBoss && text === ".forget all") {
+                await remove(ref(db, `chats/${safeId}`));
+                return await sock.sendMessage(jid, { text: "Theek hai Boss, memory clear! ❤️" });
             }
 
-            // AI Toggle (Boss for all, Others for self)
+            // AI Toggle (.aion / .aioff)
             if (text === ".aioff" && (isBoss || !isGroup)) {
                 await update(settingsRef, { enabled: false });
-                return await sock.sendMessage(jid, { text: "Ayesha AI: OFF ❌" });
+                return await sock.sendMessage(jid, { text: "Ayesha Mode: OFF ❌" });
             }
             if (text === ".aion" && (isBoss || !isGroup)) {
                 await update(settingsRef, { enabled: true });
-                return await sock.sendMessage(jid, { text: "Ayesha AI: ON ✅" });
+                return await sock.sendMessage(jid, { text: "Ayesha Mode: ON ✅" });
             }
 
-            // Check if AI should reply
             const settingsSnap = await get(settingsRef);
             const isEnabled = settingsSnap.val()?.enabled ?? (!isGroup);
             if (!isEnabled && !isBoss) return;
 
-            // --- GEMINI RULES: Rate Limiting ---
+            // Rate Limit Gap (4 seconds)
             const now = Date.now();
-            if (now - lastRequestTime < 3500) return; // 3.5 sec gap
+            if (now - lastRequestTime < 4000) return;
             lastRequestTime = now;
 
-            // --- AI PROCESS ---
-            const historySnap = await get(query(ref(db, `chats/${safeId}`), limitToLast(8)));
+            const historySnap = await get(query(ref(db, `chats/${safeId}`), limitToLast(6)));
             let historyText = "";
             historySnap.forEach(s => { historyText += `${s.val().role}: ${s.val().text}\n`; });
 
             const training = isBoss ? TRAIN_FOR_BOSS : TRAIN_FOR_OTHERS;
 
             if (!model) await fetchApiKey();
-            const result = await model.generateContent(`${training}\n\nChat History:\n${historyText}\nUser: ${text}`);
+            const result = await model.generateContent(`${training}\n\nConstraint: Reply in max 2 short sentences.\nHistory:\n${historyText}\nUser: ${text}`);
             const aiReply = result.response.text().trim();
 
-            // Save Memory
             await push(ref(db, `chats/${safeId}`), { role: isBoss ? "Boss" : "User", text: text });
             await push(ref(db, `chats/${safeId}`), { role: "Ayesha", text: aiReply });
             
             await sock.sendMessage(jid, { text: aiReply });
 
         } catch (e) {
-            console.log("System Busy or Limit Reached.");
+            console.log("AI Busy.");
         }
     });
 }
 
-// --- 🛠️ OS DASHBOARD ---
+// --- DASHBOARD UI ---
 app.get('/', (req, res) => {
     res.send(`
-    <html>
-    <head><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <html><head><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body { background: #0a0f14; color: white; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        .card { background: #141c24; padding: 40px; border-radius: 30px; box-shadow: 0 15px 50px rgba(0,0,0,0.6); width: 90%; max-width: 400px; text-align: center; border: 1px solid #ffffff10; }
-        .orb { width: 15px; height: 15px; border-radius: 50%; display: inline-block; background: ${isConnected ? '#00ffa3' : '#ff3e3e'}; box-shadow: 0 0 15px ${isConnected ? '#00ffa3' : '#ff3e3e'}; margin-right: 10px; }
-        h1 { color: #00ffa3; font-size: 1.8rem; margin: 0; }
-        .qr-img { background: white; padding: 15px; border-radius: 20px; width: 220px; margin-top: 20px; }
+        .card { background: #141c24; padding: 40px; border-radius: 30px; box-shadow: 0 10px 50px rgba(0,0,0,0.5); width: 90%; max-width: 400px; text-align: center; border: 1px solid #ffffff10; }
+        .orb { width: 12px; height: 12px; border-radius: 50%; display: inline-block; background: ${isConnected ? '#00ffa3' : '#ff3e3e'}; margin-right: 10px; box-shadow: 0 0 10px ${isConnected ? '#00ffa3' : '#ff3e3e'}; }
     </style>
     <script>setInterval(() => { location.reload(); }, 12000);</script></head>
     <body>
         <div class="card">
-            <h1>🌸 Ayesha AI OS</h1>
-            <p style="opacity: 0.5;">Stable v4.0 - Permanent Connect</p>
-            <div style="margin: 25px 0;">
-                <span class="orb"></span> <span style="font-weight: bold; font-size: 1.1rem;">${botStatus}</span>
-            </div>
-            ${!isConnected && qrCodeImage ? `
-                <img src="${qrCodeImage}" class="qr-img">
-                <p style="margin-top: 15px;">Link your WhatsApp to start</p>
-            ` : `
-                <div style="background: #ffffff05; padding: 20px; border-radius: 15px; text-align: left;">
-                    <b>Status:</b> Operating Normal<br>
-                    <b>Role:</b> Personal Assistant<br>
-                    <b>Target:</b> ${MY_NUMBER.split('@')[0]} (Boss)
-                </div>
-            `}
+            <h1 style="color: #00ffa3;">🌸 Ayesha AI</h1>
+            <div style="margin: 20px 0;"><span class="orb"></span> <b>${botStatus}</b></div>
+            ${!isConnected && qrCodeImage ? `<img src="${qrCodeImage}" width="220" style="background:white; border-radius:15px; padding:10px;">` : `<p>Serving Boss: ${MY_NUMBER.split('@')[0]}</p>`}
         </div>
     </body></html>
     `);
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 OS Dashboard Live: http://localhost:${PORT}`);
+    console.log(`🚀 OS Link: http://localhost:${PORT}`);
     startAyesha();
 });
 
